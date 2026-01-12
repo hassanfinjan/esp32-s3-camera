@@ -1,132 +1,101 @@
 #include <Arduino.h>
-#include "esp_camera.h"
 #include <WiFi.h>
 #include <WebServer.h>
+#include <USB.h>
+#include <USBHIDKeyboard.h>
 
-// WiFi credentials - CHANGE THESE!
 const char* ssid = "Hasony";
 const char* password = "Msyr8437";
 
-// Camera pins from your pinout diagram
-#define PWDN_GPIO_NUM    -1
-#define RESET_GPIO_NUM   -1
-#define XCLK_GPIO_NUM    15
-#define SIOD_GPIO_NUM     4
-#define SIOC_GPIO_NUM     5
-
-#define Y9_GPIO_NUM      16
-#define Y8_GPIO_NUM      17
-#define Y7_GPIO_NUM      18
-#define Y6_GPIO_NUM      12
-#define Y5_GPIO_NUM      10
-#define Y4_GPIO_NUM       8
-#define Y3_GPIO_NUM       9
-#define Y2_GPIO_NUM      11
-#define VSYNC_GPIO_NUM    6
-#define HREF_GPIO_NUM     7
-#define PCLK_GPIO_NUM    13
-
-#define LED_GPIO_NUM      2
-
+USBHIDKeyboard Keyboard;
 WebServer server(80);
 
+#define LED_PIN 2
+
 void handleRoot() {
-  String html = "<!DOCTYPE html><html><head><title>ESP32-S3 Camera</title>";
-  html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
-  html += "<style>body{font-family:Arial;text-align:center;margin:20px;}";
-  html += "img{max-width:100%;height:auto;border:2px solid #333;}";
-  html += "button{padding:10px 20px;font-size:16px;margin:10px;}</style></head><body>";
-  html += "<h1>ESP32-S3 Camera Stream</h1>";
-  html += "<img src='/stream' id='stream'><br>";
-  html += "<button onclick='location.reload()'>Refresh</button>";
-  html += "<button onclick=\"document.getElementById('stream').src='/capture?'+Date.now()\">Capture</button>";
+  String html = "<!DOCTYPE html><html><head>";
+  html += "<meta name='viewport' content='width=device-width,initial-scale=1'>";
+  html += "<style>body{font-family:Arial;text-align:center;padding:20px;}";
+  html += "button{padding:15px 30px;margin:10px;font-size:18px;cursor:pointer;}</style>";
+  html += "</head><body>";
+  html += "<h1>ESP32-S3 Phone Controller</h1>";
+  html += "<h3>Control your phone via USB!</h3>";
+  html += "<button onclick=\"fetch('/type?text=Hello')\">Type 'Hello'</button><br>";
+  html += "<button onclick=\"fetch('/home')\">Home Button</button><br>";
+  html += "<button onclick=\"fetch('/back')\">Back Button</button><br>";
+  html += "<button onclick=\"fetch('/menu')\">Menu</button><br>";
+  html += "<button onclick=\"fetch('/volume_up')\">Volume Up</button><br>";
+  html += "<button onclick=\"fetch('/volume_down')\">Volume Down</button><br>";
+  html += "<form onsubmit=\"event.preventDefault();fetch('/type?text='+document.getElementById('txt').value);\">";
+  html += "<input id='txt' placeholder='Type anything...' style='padding:10px;width:200px;'>";
+  html += "<button type='submit'>Send</button></form>";
   html += "</body></html>";
-  
   server.send(200, "text/html", html);
 }
 
-void handleStream() {
-  WiFiClient client = server.client();
-  
-  client.println("HTTP/1.1 200 OK");
-  client.println("Content-Type: multipart/x-mixed-replace; boundary=frame");
-  client.println();
-  
-  while (client.connected()) {
-    camera_fb_t *fb = esp_camera_fb_get();
-    if (!fb) {
-      Serial.println("Camera capture failed");
-      break;
-    }
-    
-    client.println("--frame");
-    client.println("Content-Type: image/jpeg");
-    client.printf("Content-Length: %d\r\n\r\n", fb->len);
-    client.write(fb->buf, fb->len);
-    client.println();
-    
-    esp_camera_fb_return(fb);
-    
-    if (!client.connected()) break;
+void handleType() {
+  if (server.hasArg("text")) {
+    String text = server.arg("text");
+    Keyboard.print(text);
+    server.send(200, "text/plain", "Typed: " + text);
+    Serial.println("Typed: " + text);
+  } else {
+    server.send(400, "text/plain", "Missing text parameter");
   }
 }
 
-void handleCapture() {
-  camera_fb_t *fb = esp_camera_fb_get();
-  if (!fb) {
-    server.send(500, "text/plain", "Camera capture failed");
-    return;
-  }
-  
-  server.send_P(200, "image/jpeg", (const char *)fb->buf, fb->len);
-  esp_camera_fb_return(fb);
+void handleHome() {
+  Keyboard.press(KEY_ESC);
+  delay(100);
+  Keyboard.releaseAll();
+  server.send(200, "text/plain", "Home pressed");
+}
+
+void handleBack() {
+  Keyboard.press(KEY_BACKSPACE);
+  delay(100);
+  Keyboard.releaseAll();
+  server.send(200, "text/plain", "Back pressed");
+}
+
+void handleMenu() {
+  Keyboard.press(KEY_TAB);
+  delay(100);
+  Keyboard.releaseAll();
+  server.send(200, "text/plain", "Menu pressed");
+}
+
+void handleVolumeUp() {
+  Keyboard.press(KEY_UP_ARROW);
+  delay(100);
+  Keyboard.releaseAll();
+  server.send(200, "text/plain", "Volume Up");
+}
+
+void handleVolumeDown() {
+  Keyboard.press(KEY_DOWN_ARROW);
+  delay(100);
+  Keyboard.releaseAll();
+  server.send(200, "text/plain", "Volume Down");
 }
 
 void setup() {
   Serial.begin(115200);
-  Serial.println("ESP32-S3 Camera Starting...");
+  delay(1000);
   
-  pinMode(LED_GPIO_NUM, OUTPUT);
-  digitalWrite(LED_GPIO_NUM, HIGH);
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, HIGH);
   
-  camera_config_t config;
-  config.ledc_channel = LEDC_CHANNEL_0;
-  config.ledc_timer = LEDC_TIMER_0;
-  config.pin_d0 = Y2_GPIO_NUM;
-  config.pin_d1 = Y3_GPIO_NUM;
-  config.pin_d2 = Y4_GPIO_NUM;
-  config.pin_d3 = Y5_GPIO_NUM;
-  config.pin_d4 = Y6_GPIO_NUM;
-  config.pin_d5 = Y7_GPIO_NUM;
-  config.pin_d6 = Y8_GPIO_NUM;
-  config.pin_d7 = Y9_GPIO_NUM;
-  config.pin_xclk = XCLK_GPIO_NUM;
-  config.pin_pclk = PCLK_GPIO_NUM;
-  config.pin_vsync = VSYNC_GPIO_NUM;
-  config.pin_href = HREF_GPIO_NUM;
-  config.pin_sccb_sda = SIOD_GPIO_NUM;
-  config.pin_sccb_scl = SIOC_GPIO_NUM;
-  config.pin_pwdn = PWDN_GPIO_NUM;
-  config.pin_reset = RESET_GPIO_NUM;
-  config.xclk_freq_hz = 20000000;
-  config.pixel_format = PIXFORMAT_JPEG;
-  config.frame_size = FRAMESIZE_SVGA;
-  config.jpeg_quality = 12;
-  config.fb_count = 2;
-  config.fb_location = CAMERA_FB_IN_PSRAM;
-  config.grab_mode = CAMERA_GRAB_LATEST;
+  Serial.println("\nESP32-S3 Phone Controller Starting...");
   
-  esp_err_t err = esp_camera_init(&config);
-  if (err != ESP_OK) {
-    Serial.printf("Camera init FAILED: 0x%x\n", err);
-    digitalWrite(LED_GPIO_NUM, LOW);
-    while(1) delay(1000);
-  }
+  // Initialize USB Keyboard
+  Keyboard.begin();
+  USB.begin();
+  Serial.println("USB Keyboard initialized");
   
-  Serial.println("Camera initialized!");
-  
-  Serial.printf("Connecting to %s...\n", ssid);
+  // Connect to WiFi
   WiFi.begin(ssid, password);
+  Serial.print("Connecting to WiFi");
   
   int attempts = 0;
   while (WiFi.status() != WL_CONNECTED && attempts < 20) {
@@ -136,26 +105,33 @@ void setup() {
   }
   
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\nWiFi connected!");
-    Serial.print("Camera URL: http://");
+    Serial.println("\nWiFi Connected!");
+    Serial.print("Control Panel: http://");
     Serial.println(WiFi.localIP());
     
+    // Blink LED to show success
     for(int i=0; i<3; i++) {
-      digitalWrite(LED_GPIO_NUM, LOW);
+      digitalWrite(LED_PIN, LOW);
       delay(200);
-      digitalWrite(LED_GPIO_NUM, HIGH);
+      digitalWrite(LED_PIN, HIGH);
       delay(200);
     }
   } else {
-    Serial.println("\nWiFi connection failed!");
+    Serial.println("\nWiFi Failed!");
   }
   
+  // Setup web server
   server.on("/", handleRoot);
-  server.on("/stream", handleStream);
-  server.on("/capture", handleCapture);
-  server.begin();
+  server.on("/type", handleType);
+  server.on("/home", handleHome);
+  server.on("/back", handleBack);
+  server.on("/menu", handleMenu);
+  server.on("/volume_up", handleVolumeUp);
+  server.on("/volume_down", handleVolumeDown);
   
+  server.begin();
   Serial.println("Web server started!");
+  Serial.println("\nReady! Connect phone via USB and control from web interface.");
 }
 
 void loop() {
