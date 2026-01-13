@@ -2,7 +2,11 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <SPIFFS.h>
-#include <Update.h>
+#include <Adafruit_NeoPixel.h>
+#include <BLEDevice.h>
+#include <BLEUtils.h>
+#include <BLEScan.h>
+#include <BLEAdvertisedDevice.h>
 
 // AP Configuration
 const char* ap_ssid = "ESP32-S3";
@@ -10,18 +14,29 @@ const char* ap_password = "12345678";
 
 WebServer server(80);
 
-// Pin Definitions
-#define LED_PIN 2
-#define RGB_R_PIN 38  // Adjust based on your board
-#define RGB_G_PIN 39
-#define RGB_B_PIN 40
+// Pin Definitions (from your pinout)
+#define LED_PIN 2        // LED_ON
+#define RGB_PIN 48       // WS2812
+#define RGB_COUNT 1      // Single RGB LED
+
+// NeoPixel setup
+Adafruit_NeoPixel strip(RGB_COUNT, RGB_PIN, NEO_GRB + NEO_KHZ800);
+
+// BLE Scan
+BLEScan* pBLEScan;
+std::vector<String> bleDevices;
+
+class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
+  void onResult(BLEAdvertisedDevice advertisedDevice) {
+    String device = String(advertisedDevice.toString().c_str());
+    bleDevices.push_back(device);
+  }
+};
 
 // State variables
 bool ledState = false;
-bool rgbState = false;
 uint8_t rgbR = 0, rgbG = 0, rgbB = 0;
 
-// HTML/CSS/JS for the main interface
 const char* HTML_HEADER = R"(
 <!DOCTYPE html>
 <html>
@@ -87,7 +102,7 @@ const char* HTML_HEADER = R"(
     button.success {
       background: linear-gradient(135deg, #00ff88 0%, #00cc66 100%);
     }
-    input[type="text"], input[type="range"], input[type="color"] {
+    input[type="range"], input[type="color"] {
       width: 100%;
       padding: 10px;
       margin: 5px 0;
@@ -120,6 +135,7 @@ const char* HTML_HEADER = R"(
       background: rgba(0,217,255,0.1);
       border-radius: 5px;
       border-left: 3px solid #00d9ff;
+      font-size: 12px;
     }
     .file-item {
       padding: 8px;
@@ -138,6 +154,13 @@ const char* HTML_HEADER = R"(
       justify-content: space-between;
       margin-bottom: 5px;
       color: #00d9ff;
+    }
+    .color-preview {
+      width: 100%;
+      height: 50px;
+      border-radius: 8px;
+      margin: 10px 0;
+      border: 2px solid rgba(0,217,255,0.3);
     }
     .loading {
       display: inline-block;
@@ -183,6 +206,7 @@ const char* HTML_FOOTER = R"(
       const g = document.getElementById('rgbG').value;
       const b = document.getElementById('rgbB').value;
       cmd(`/rgb?r=${r}&g=${g}&b=${b}`, () => {
+        document.getElementById('colorPreview').style.background = `rgb(${r},${g},${b})`;
         document.getElementById('rgbStatus').className = 'status on';
         document.getElementById('rgbStatus').innerText = `RGB: ${r},${g},${b}`;
       });
@@ -193,6 +217,7 @@ const char* HTML_FOOTER = R"(
         document.getElementById('rgbR').value = 0;
         document.getElementById('rgbG').value = 0;
         document.getElementById('rgbB').value = 0;
+        document.getElementById('colorPreview').style.background = 'rgb(0,0,0)';
         document.getElementById('rgbStatus').className = 'status off';
         document.getElementById('rgbStatus').innerText = 'RGB OFF';
       });
@@ -206,7 +231,7 @@ const char* HTML_FOOTER = R"(
     }
     
     function scanBLE() {
-      document.getElementById('bleResults').innerHTML = '<div class="loading"></div> Scanning...';
+      document.getElementById('bleResults').innerHTML = '<div class="loading"></div> Scanning BLE devices...';
       cmd('/scan_ble', data => {
         document.getElementById('bleResults').innerHTML = data;
       });
@@ -225,14 +250,12 @@ const char* HTML_FOOTER = R"(
       }
     }
     
-    // Update sliders display
     ['rgbR','rgbG','rgbB'].forEach(id => {
       document.getElementById(id).oninput = function() {
         document.getElementById(id+'Val').innerText = this.value;
       };
     });
     
-    // Load files on start
     listFiles();
   </script>
 </body>
@@ -242,7 +265,6 @@ const char* HTML_FOOTER = R"(
 void handleRoot() {
   String html = HTML_HEADER;
   
-  // LED Control Card
   html += R"(
     <div class='grid'>
       <div class='card'>
@@ -253,8 +275,9 @@ void handleRoot() {
       </div>
       
       <div class='card'>
-        <h2>🌈 RGB Control</h2>
+        <h2>🌈 WS2812 RGB LED</h2>
         <div id='rgbStatus' class='status off'>RGB OFF</div>
+        <div class='color-preview' id='colorPreview' style='background:rgb(0,0,0)'></div>
         <div class='slider-container'>
           <div class='slider-label'><span>Red</span><span id='rgbRVal'>0</span></div>
           <input type='range' id='rgbR' min='0' max='255' value='0'>
@@ -267,8 +290,8 @@ void handleRoot() {
           <div class='slider-label'><span>Blue</span><span id='rgbBVal'>0</span></div>
           <input type='range' id='rgbB' min='0' max='255' value='0'>
         </div>
-        <button class='success' onclick='updateRGB()'>Apply RGB</button>
-        <button class='danger' onclick='rgbOff()'>RGB OFF</button>
+        <button class='success' onclick='updateRGB()'>Apply</button>
+        <button class='danger' onclick='rgbOff()'>OFF</button>
       </div>
       
       <div class='card'>
@@ -278,23 +301,23 @@ void handleRoot() {
       </div>
       
       <div class='card'>
-        <h2>📶 Bluetooth Scanner</h2>
-        <button onclick='scanBLE()'>🔍 Scan BLE Devices</button>
+        <h2>📶 BLE Scanner</h2>
+        <button onclick='scanBLE()'>🔍 Scan BLE</button>
         <div id='bleResults'></div>
       </div>
       
       <div class='card'>
         <h2>📁 File System</h2>
-        <button onclick='listFiles()'>🔄 Refresh Files</button>
+        <button onclick='listFiles()'>🔄 Refresh</button>
         <div id='fileList'></div>
       </div>
       
       <div class='card'>
         <h2>⚙️ System</h2>
+        <div class='status on'>Heap: )" + String(ESP.getFreeHeap()/1024) + R"( KB</div>
+        <div class='status on'>PSRAM: )" + String(ESP.getPsramSize()/1024) + R"( KB</div>
         <button onclick='restart()'>🔄 Restart</button>
-        <button class='danger' onclick='if(confirm("Format SPIFFS?")) cmd("/format")'>⚠️ Format FS</button>
-        <div class='status on'>Free Heap: )" + String(ESP.getFreeHeap()) + R"( bytes</div>
-        <div class='status on'>PSRAM: )" + String(ESP.getPsramSize()) + R"( bytes</div>
+        <button class='danger' onclick='if(confirm("Format?")) cmd("/format")'>⚠️ Format</button>
       </div>
     </div>
   )";
@@ -317,11 +340,9 @@ void handleRGB() {
     rgbG = server.arg("g").toInt();
     rgbB = server.arg("b").toInt();
     
-    analogWrite(RGB_R_PIN, rgbR);
-    analogWrite(RGB_G_PIN, rgbG);
-    analogWrite(RGB_B_PIN, rgbB);
+    strip.setPixelColor(0, strip.Color(rgbR, rgbG, rgbB));
+    strip.show();
     
-    rgbState = (rgbR > 0 || rgbG > 0 || rgbB > 0);
     server.send(200, "text/plain", "OK");
   }
 }
@@ -336,9 +357,8 @@ void handleWiFiScan() {
     for(int i = 0; i < n; i++) {
       html += "<div class='scan-item'>";
       html += "<strong>" + WiFi.SSID(i) + "</strong><br>";
-      html += "Signal: " + String(WiFi.RSSI(i)) + " dBm | ";
-      html += "Channel: " + String(WiFi.channel(i)) + " | ";
-      html += (WiFi.encryptionType(i) == WIFI_AUTH_OPEN) ? "Open" : "Secured";
+      html += "RSSI: " + String(WiFi.RSSI(i)) + " dBm | Ch: " + String(WiFi.channel(i));
+      html += " | " + String((WiFi.encryptionType(i) == WIFI_AUTH_OPEN) ? "Open" : "Secure");
       html += "</div>";
     }
   }
@@ -347,10 +367,20 @@ void handleWiFiScan() {
 }
 
 void handleBLEScan() {
-  // Note: Full BLE scan implementation would be more complex
-  // This is a simplified version
-  String html = "<div class='scan-item'>BLE Scanning not fully implemented yet.<br>";
-  html += "Would require BLE library initialization.</div>";
+  String html = "";
+  bleDevices.clear();
+  
+  BLEScanResults foundDevices = pBLEScan->start(5, false);
+  
+  if(bleDevices.size() == 0) {
+    html = "<div class='scan-item'>No BLE devices found</div>";
+  } else {
+    for(int i = 0; i < bleDevices.size(); i++) {
+      html += "<div class='scan-item'>" + bleDevices[i] + "</div>";
+    }
+  }
+  
+  pBLEScan->clearResults();
   server.send(200, "text/html", html);
 }
 
@@ -359,16 +389,18 @@ void handleFileList() {
   File root = SPIFFS.open("/");
   File file = root.openNextFile();
   
-  if(!file) {
-    html = "<div class='file-item'>No files found</div>";
-  }
-  
+  int count = 0;
   while(file) {
     html += "<div class='file-item'>";
     html += "<span>📄 " + String(file.name()) + "</span>";
-    html += "<span>" + String(file.size()) + " bytes</span>";
+    html += "<span>" + String(file.size()) + " B</span>";
     html += "</div>";
     file = root.openNextFile();
+    count++;
+  }
+  
+  if(count == 0) {
+    html = "<div class='file-item'>No files</div>";
   }
   
   server.send(200, "text/html", html);
@@ -393,28 +425,34 @@ void setup() {
   
   // Setup pins
   pinMode(LED_PIN, OUTPUT);
-  pinMode(RGB_R_PIN, OUTPUT);
-  pinMode(RGB_G_PIN, OUTPUT);
-  pinMode(RGB_B_PIN, OUTPUT);
-  
   digitalWrite(LED_PIN, LOW);
+  
+  // Initialize NeoPixel
+  strip.begin();
+  strip.show(); // Initialize to OFF
+  strip.setBrightness(50); // 50/255 brightness
+  
+  // Initialize BLE
+  BLEDevice::init("");
+  pBLEScan = BLEDevice::getScan();
+  pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
+  pBLEScan->setActiveScan(true);
+  pBLEScan->setInterval(100);
+  pBLEScan->setWindow(99);
   
   // Initialize SPIFFS
   if(!SPIFFS.begin(true)) {
-    Serial.println("SPIFFS Mount Failed");
-  } else {
-    Serial.println("SPIFFS Mounted");
+    Serial.println("SPIFFS Failed");
   }
   
-  // Create WiFi AP
+  // Create AP
   WiFi.mode(WIFI_AP);
   WiFi.softAP(ap_ssid, ap_password);
   
-  IPAddress IP = WiFi.softAPIP();
   Serial.print("AP IP: http://");
-  Serial.println(IP);
+  Serial.println(WiFi.softAPIP());
   
-  // Setup routes
+  // Routes
   server.on("/", handleRoot);
   server.on("/led", handleLED);
   server.on("/rgb", handleRGB);
@@ -425,18 +463,17 @@ void setup() {
   server.on("/restart", handleRestart);
   
   server.begin();
-  Serial.println("Web server started!");
-  Serial.println("Connect to WiFi: ESP32-S3");
-  Serial.println("Password: 12345678");
-  Serial.println("Then open: http://192.168.4.1");
+  Serial.println("Ready! Connect to: ESP32-S3 (12345678)");
+  Serial.println("Open: http://192.168.4.1");
   
-  // Blink LED to show ready
-  for(int i=0; i<5; i++) {
-    digitalWrite(LED_PIN, HIGH);
-    delay(100);
-    digitalWrite(LED_PIN, LOW);
-    delay(100);
+  // Startup animation
+  for(int i=0; i<255; i+=5) {
+    strip.setPixelColor(0, strip.Color(0, i, 255-i));
+    strip.show();
+    delay(10);
   }
+  strip.setPixelColor(0, 0);
+  strip.show();
 }
 
 void loop() {
